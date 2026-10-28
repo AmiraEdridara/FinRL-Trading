@@ -15,6 +15,7 @@ SINGLE_DATE=""
 SKIP_DOWNLOAD=false
 FREQ="W-FRI"
 NO_FAST_TRACK=false
+STOPS_ONLY=false
 DRY_RUN=false
 ACCOUNT=""               # Alpaca account name (paper mode)
 
@@ -96,6 +97,7 @@ Backtest Options:
   --end DATE             Backtest end date    (default: $END_DATE)
   --freq FREQ            Rebalance frequency  (default: $FREQ)
   --no-fast-track        Disable daily Fast Risk-Off monitoring
+  --stops-only           Apply stop-loss exits to returns, skip Fast Risk-Off
 
 Single / Paper Options:
   --date DATE            Decision date (default: today)
@@ -158,6 +160,7 @@ while [[ $# -gt 0 ]]; do
         --data-dir)      DATA_DIR="$2";      shift 2 ;;
         --freq)          FREQ="$2";          shift 2 ;;
         --no-fast-track) NO_FAST_TRACK=true; shift   ;;
+        --stops-only)    STOPS_ONLY=true;    shift   ;;
         --skip-download) SKIP_DOWNLOAD=true; shift   ;;
         --dry-run)       DRY_RUN=true;       shift   ;;
         --account)       ACCOUNT="$2";       shift 2 ;;
@@ -227,7 +230,8 @@ echo " Mode:       $MODE"
 if [[ "$MODE" == "backtest" ]]; then
     echo " Period:     $START_DATE ~ $END_DATE"
     echo " Frequency:  $FREQ"
-    echo " Fast Track: $([ "$NO_FAST_TRACK" = true ] && echo Disabled || echo Enabled)"
+    echo " Fast Track: $([ "$NO_FAST_TRACK" = true ] || [ "$STOPS_ONLY" = true ] && echo Disabled || echo Enabled)"
+    echo " Stops Only: $([ "$STOPS_ONLY" = true ] && echo Yes || echo No)"
 elif [[ "$MODE" == "single" ]]; then
     echo " Date:       $SINGLE_DATE"
 elif [[ "$MODE" == "paper" ]]; then
@@ -336,6 +340,7 @@ if [[ "$MODE" == "backtest" ]]; then
     CMD=(python3 "$RUNNER" --config "$CONFIG" --data-dir "$DATA_DIR")
     CMD+=(--backtest --start "$START_DATE" --end "$END_DATE" --freq "$FREQ")
     [[ "$NO_FAST_TRACK" == true ]] && CMD+=(--no-daily-fast-track)
+    [[ "$STOPS_ONLY" == true ]] && CMD+=(--stops-only)
     "${CMD[@]}"
 
 elif [[ "$MODE" == "single" ]]; then

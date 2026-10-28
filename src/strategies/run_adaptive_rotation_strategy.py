@@ -96,7 +96,7 @@ def run_single_date(config_path: str, as_of_date: str, data_dir: str = None):
 
 def run_backtest(config_path: str, start_date: str, end_date: str, 
                  data_dir: str = None, freq: str = "W-FRI", 
-                 daily_fast_track: bool = True):
+                 daily_fast_track: bool = True, stops_only: bool = False):
     """
     Run backtest over a date range
     
@@ -107,13 +107,18 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
         data_dir: Optional data directory path
         freq: Regular rebalance frequency (default: W-FRI)
         daily_fast_track: Enable daily Fast Risk-Off monitoring (default: True)
+        stops_only: Apply stop-loss exits to the portfolio (they change returns)
+                    and skip Fast Risk-Off. Needs daily monitoring.
     """
+    if stops_only:
+        daily_fast_track = True  # stops are checked daily
     print(f"\n{'='*60}")
     print(f"Running Backtest")
     print(f"Config: {config_path}")
     print(f"Period: {start_date} to {end_date}")
     print(f"Rebalance: {freq}")
-    print(f"Daily Fast Track: {'Enabled' if daily_fast_track else 'Disabled'}")
+    print(f"Daily Fast Track: {'Enabled' if daily_fast_track and not stops_only else 'Disabled'}")
+    print(f"Stops Only (applied to returns): {'Yes' if stops_only else 'No'}")
     print(f"{'='*60}\n")
     
     # 1. Load data first
@@ -152,6 +157,8 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
     # Statistics tracking (DDS: only Weekly is rebalance, others are adjustments)
     fast_track_adjustment_count = 0
     stop_loss_adjustment_count = 0
+    risk_events = []  # daily risk actions, saved so they can be applied to returns
+    current_weights_obj = None  # last PortfolioWeights held (for stops_only)
     
     for i, date in enumerate(decision_dates, 1):
         try:
@@ -176,7 +183,7 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
                 trigger_reasons.append('weekly_rebalance')
             
             # Priority 2: Fast Risk-Off (only if not weekly)
-            elif daily_fast_track:
+            elif daily_fast_track and not stops_only:
                 from src.strategies.adaptive_rotation.market_regime import check_fast_risk_off_trigger
                 
                 should_trigger_fast, signals = check_fast_risk_off_trigger(
@@ -237,6 +244,8 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
                     mode='backtest'
                 )
                 
+                current_weights_obj = weights
+
                 # Update current positions based on new weights
                 current_positions = {}
                 for symbol, weight in weights.weights.items():
@@ -287,6 +296,9 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
                 # Log as adjustment, not full rebalance
                 print(f"   [FAST TRACK ADJUSTMENT] Would reduce exposure to {target_invested:.1%} (event logged)")
                 fast_track_adjustment_count += 1
+                risk_events.append({'date': date, 'type': 'fast_track', 'symbols': '',
+                                    'until': fast_track_active_until,
+                                    'cash_floor': fast_config.behavior.cash_floor})
                 
                 # Note: No audit log generated (this is not a full strategy decision)
                 # No results.append (no rebalance occurred)
@@ -305,7 +317,35 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
                       f"{', '.join(stopped_symbols)}")
                 print(f"      Cooldown activated: {cooldown_days} days (blocks re-entry)")
                 stop_loss_adjustment_count += 1
+                risk_events.append({'date': date, 'type': 'stop_loss',
+                                    'symbols': ';'.join(stopped_symbols),
+                                    'until': '', 'cash_floor': ''})
                 
+                # stops_only: actually sell the stopped assets until the next weekly
+                # rebalance. Proceeds stay in cash. Recorded as a weights row so the
+                # performance report includes the exit.
+                if stops_only and current_weights_obj is not None:
+                    from dataclasses import replace
+                    new_w = {s: w for s, w in current_weights_obj.weights.items()
+                             if s not in stopped_symbols}
+                    current_weights_obj = replace(
+                        current_weights_obj,
+                        as_of_date=date,
+                        weights=new_w,
+                        cash_weight=1.0 - sum(new_w.values()),
+                    )
+                    results.append({
+                        'date': date,
+                        'invested': current_weights_obj.get_invested_weight(),
+                        'cash': current_weights_obj.cash_weight,
+                        'regime': current_weights_obj.regime_state,
+                        'num_assets': len(new_w),
+                        'weights': current_weights_obj,
+                        'audit': None,
+                        'decision_type': 'stop_loss_trigger',
+                        'trigger_reasons': trigger_reasons
+                    })
+
                 # current_positions already updated by risk_result.updated_positions
                 # Note: No audit log, no results.append (this is risk management, not rebalance)
                 # Released capital stays as cash, not reallocated
@@ -353,21 +393,22 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
         print(f"\nSuccessful runs: {len(results)} / {len(decision_dates)} decision points")
     
     if results:
-        avg_invested = sum(r['invested'] for r in results) / len(results)
-        avg_num_assets = sum(r['num_assets'] for r in results) / len(results)
+        weekly_results = [r for r in results if r.get('decision_type') == 'weekly'] or results
+        avg_invested = sum(r['invested'] for r in weekly_results) / len(weekly_results)
+        avg_num_assets = sum(r['num_assets'] for r in weekly_results) / len(weekly_results)
         
         print(f"\nAverage invested: {avg_invested:.2%}")
         print(f"Average # of assets: {avg_num_assets:.1f}")
         
         # Regime distribution
         regime_counts = {}
-        for r in results:
+        for r in weekly_results:
             regime = r['regime']
             regime_counts[regime] = regime_counts.get(regime, 0) + 1
         
         print(f"\nRegime Distribution:")
         for regime, count in sorted(regime_counts.items()):
-            print(f"  {regime:15s}: {count:4d} ({count/len(results)*100:.1f}%)")
+            print(f"  {regime:15s}: {count:4d} ({count/len(weekly_results)*100:.1f}%)")
         
         # Note: Fast Track and Stop-Loss events are logged inline during execution
         # They are not recorded in results[] as they don't trigger full rebalances
@@ -400,10 +441,18 @@ def run_backtest(config_path: str, start_date: str, end_date: str,
         audit_dir.mkdir(parents=True, exist_ok=True)
         
         for r in results:
+            if r['audit'] is None:
+                continue  # stop-loss rows have no audit log
             audit_file = audit_dir / f"audit_{r['date'].strftime('%Y-%m-%d')}.json"
             r['audit'].to_json(str(audit_file))
         
         print(f"Audit logs saved to: {audit_dir}")
+
+        # Save daily risk events (fast track cuts and stop-loss exits)
+        events_file = weights_dir / f"risk_events_{start_date}_to_{end_date}.csv"
+        pd.DataFrame(risk_events, columns=['date', 'type', 'symbols', 'until', 'cash_floor']
+                     ).to_csv(events_file, index=False)
+        print(f"Risk events saved to: {events_file}")
 
         # 6. Performance analysis & equity curve
         _generate_performance_report(
@@ -467,11 +516,15 @@ def _generate_performance_report(weights_df, start_date, end_date, data_dir, out
             start_price = series.loc[:equity.index[0]].iloc[-1]
             equity[bench] = series.reindex(equity.index, method='ffill') / start_price
 
+    # Weekly view for volatility, Sharpe and win rate. With stops_only the
+    # equity has extra mid-week rows, so resample to keep weekly statistics.
+    equity_w = equity.resample('W-FRI').last().dropna(how='all')
+
     # Metrics
     total_ret = equity['portfolio'].iloc[-1] - 1
     years = (equity.index[-1] - equity.index[0]).days / 365.25
     ann_ret = (1 + total_ret) ** (1 / years) - 1
-    weekly_rets = equity['portfolio'].pct_change().dropna()
+    weekly_rets = equity_w['portfolio'].pct_change().dropna()
     ann_vol = weekly_rets.std() * np.sqrt(52)
     sharpe = ann_ret / ann_vol if ann_vol > 0 else 0
     cummax = equity['portfolio'].cummax()
@@ -502,11 +555,11 @@ def _generate_performance_report(weights_df, start_date, end_date, data_dir, out
         r = equity[b].iloc[-1] - 1
         return f"{((1+r)**(1/years)-1):.2%}"
     def _ann_vol(b):
-        return f"{equity[b].pct_change().dropna().std() * np.sqrt(52):.2%}"
+        return f"{equity_w[b].pct_change().dropna().std() * np.sqrt(52):.2%}"
     def _sharpe_b(b):
         r = equity[b].iloc[-1] - 1
         ar = (1+r)**(1/years)-1
-        av = equity[b].pct_change().dropna().std() * np.sqrt(52)
+        av = equity_w[b].pct_change().dropna().std() * np.sqrt(52)
         return f"{ar/av:.2f}" if av > 0 else "N/A"
     def _max_dd_b(b):
         cm = equity[b].cummax()
@@ -654,6 +707,12 @@ Examples:
     )
     
     parser.add_argument(
+        '--stops-only',
+        action='store_true',
+        help='Apply stop-loss exits to returns and skip Fast Risk-Off'
+    )
+
+    parser.add_argument(
         '--no-daily-fast-track',
         action='store_true',
         help='Disable daily Fast Risk-Off monitoring (default: enabled)'
@@ -673,7 +732,8 @@ Examples:
                 end_date=args.end,
                 data_dir=args.data_dir,
                 freq=args.freq,
-                daily_fast_track=not args.no_daily_fast_track
+                daily_fast_track=not args.no_daily_fast_track,
+                stops_only=args.stops_only
             )
         
         elif args.date:
