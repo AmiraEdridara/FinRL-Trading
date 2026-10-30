@@ -64,6 +64,21 @@ no risk-free rate, as in the original report):
    `./deploy.sh --strategy adaptive_rotation --mode backtest --stops-only`
    Never enable the fast cuts as currently designed.
 
+## Extra test: cutting exposure on US CPI days
+
+Exposure cut to 50% at the close before each CPI release, restored after it.
+
+| Period | CPI-day move vs other days | Return earned on CPI days | Sharpe (no filter) | Sharpe (CPI filter) |
+|---|---|---|---|---|
+| 2022 | 1.84x larger | +7.20% | 0.47 | 0.23 |
+| 2025 to 2026 | 0.75x (smaller) | +0.11% | 1.56 | 1.54 |
+
+**Rejected.** In 2025 to 2026, CPI days were calmer than normal, so there was nothing
+to avoid. In 2022, CPI days were much more volatile, but the strategy was holding
+energy and commodities, which gained from hot inflation prints. It earned 7.2% on just
+12 CPI days, so cutting exposure removed its best days and halved the Sharpe ratio.
+Lesson: a volatile event is only worth avoiding if the portfolio is on the wrong side of it.
+
 ## Limitations
 
 - Only three test periods, so the evidence is suggestive rather than conclusive.
